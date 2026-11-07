@@ -15,7 +15,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 async function startServer() {
   const app = express();
-  const port = 3000;
+  const port = Number(process.env.PORT) || 3000;
 
   app.use(express.json());
 
@@ -384,10 +384,10 @@ async function startServer() {
     app.use(express.static('dist'));
   }
 
-  app.listen(port, () => {
-    console.log(`Server running on http://localhost:${port}`);
+  app.listen(port, '0.0.0.0', () => {
+    console.log(`Server running on http://0.0.0.0:${port}`);
 
-    const token = process.env.DISCORD_TOKEN;
+    const token = process.env.DISCORD_BOT_TOKEN || process.env.DISCORD_TOKEN;
     const clientId = process.env.DISCORD_CLIENT_ID;
     if (token && token !== 'YOUR_DISCORD_BOT_TOKEN') {
       botManager.start(token, clientId).then((r) => {
