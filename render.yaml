@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: discord-music-bot
+    runtime: node
+    plan: free
+    buildCommand: npm install --legacy-peer-deps && npm run build
+    startCommand: npm run start
+    envVars:
+      - key: NODE_VERSION
+        value: 22.14.0
+      - key: NPM_CONFIG_LEGACY_PEER_DEPS
+        value: "true"

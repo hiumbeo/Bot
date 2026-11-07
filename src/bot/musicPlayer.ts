@@ -12,8 +12,9 @@ import {
   type AudioResource,
 } from '@discordjs/voice';
 import type { TextChannel, VoiceBasedChannel, Message } from 'discord.js';
-import { spawn, type ChildProcess } from 'child_process';
+import { spawn, spawnSync, type ChildProcess } from 'child_process';
 import { PassThrough } from 'stream';
+import ffmpegStatic from 'ffmpeg-static';
 import type { Track, LoopMode, AudioFilterMode } from './types.js';
 import {
   buildMusicEmbed,
@@ -22,6 +23,19 @@ import {
   getCurrentAnimeGif,
 } from './embeds.js';
 import { getPlayableStreamUrl, findRelatedTrack } from './audioResolver.js';
+
+function resolveFfmpegBinary(): string {
+  try {
+    const check = spawnSync('ffmpeg', ['-version'], { stdio: 'ignore' });
+    if (check.status === 0) return 'ffmpeg';
+  } catch {}
+  if (typeof ffmpegStatic === 'string' && ffmpegStatic.length > 0) {
+    return ffmpegStatic;
+  }
+  return 'ffmpeg';
+}
+
+const FFMPEG_BIN = resolveFfmpegBinary();
 
 const AUDIO_FILTER_CHAINS: Record<AudioFilterMode, string> = {
   // Studio SoX 28-bit resampler + headroom + brickwall soft limiter to eliminate all clipping & static
@@ -337,7 +351,7 @@ export class MusicManager {
           'pipe:1'
         );
 
-        const ffmpeg = spawn('ffmpeg', ffmpegArgs, {
+        const ffmpeg = spawn(FFMPEG_BIN, ffmpegArgs, {
           stdio: ['ignore', 'pipe', 'ignore'],
         });
 
