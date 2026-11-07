@@ -1,0 +1,6 @@
+{
+  "name": "Discord Music Dashboard",
+  "description": "A web dashboard for managing music queue and playback control.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
