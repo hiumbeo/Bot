@@ -14,6 +14,7 @@ import {
 import type { TextChannel, VoiceBasedChannel, Message } from 'discord.js';
 import { spawn, spawnSync, type ChildProcess } from 'child_process';
 import { PassThrough } from 'stream';
+import fs from 'fs';
 import ffmpegStatic from 'ffmpeg-static';
 import type { Track, LoopMode, AudioFilterMode } from './types.js';
 import {
@@ -22,17 +23,29 @@ import {
   getNextAnimeGif,
   getCurrentAnimeGif,
 } from './embeds.js';
-import { getPlayableStreamUrl, findRelatedTrack } from './audioResolver.js';
+import {
+  getPlayableStreamUrl,
+  findRelatedTrack,
+  invalidateStreamCache,
+  SC_BROWSER_HEADERS,
+} from './audioResolver.js';
 
 function resolveFfmpegBinary(): string {
-  try {
-    const check = spawnSync('ffmpeg', ['-version'], { stdio: 'ignore' });
-    if (check.status === 0) return 'ffmpeg';
-  } catch {}
+  // Prefer ffmpeg-static or system ffmpeg, ensuring executable permissions on Linux hosts (Render/Railway)
   if (typeof ffmpegStatic === 'string' && ffmpegStatic.length > 0) {
-    return ffmpegStatic;
+    try {
+      fs.chmodSync(ffmpegStatic, 0o755);
+    } catch {}
+    try {
+      const checkStatic = spawnSync(ffmpegStatic, ['-version'], { stdio: 'ignore' });
+      if (checkStatic.status === 0) return ffmpegStatic;
+    } catch {}
   }
-  return 'ffmpeg';
+  try {
+    const checkSys = spawnSync('ffmpeg', ['-version'], { stdio: 'ignore' });
+    if (checkSys.status === 0) return 'ffmpeg';
+  } catch {}
+  return typeof ffmpegStatic === 'string' && ffmpegStatic ? ffmpegStatic : 'ffmpeg';
 }
 
 const FFMPEG_BIN = resolveFfmpegBinary();
@@ -74,6 +87,7 @@ export interface GuildPlayer {
   player: AudioPlayer | null;
   activeResource: AudioResource | null;
   ffmpegProcess: ChildProcess | null;
+  streamAbort: AbortController | null;
   bufferStream: PassThrough | null;
   queue: Track[];
   currentTrack: Track | null;
@@ -107,6 +121,7 @@ export class MusicManager {
         player: null,
         activeResource: null,
         ffmpegProcess: null,
+        streamAbort: null,
         bufferStream: null,
         queue: [],
         currentTrack: null,
@@ -136,8 +151,15 @@ export class MusicManager {
   }
 
   private killFfmpeg(gp: GuildPlayer) {
+    if (gp.streamAbort) {
+      try {
+        gp.streamAbort.abort();
+      } catch {}
+      gp.streamAbort = null;
+    }
     if (gp.ffmpegProcess) {
       try {
+        gp.ffmpegProcess.stdin?.destroy();
         gp.ffmpegProcess.stdout?.unpipe();
         gp.ffmpegProcess.kill('SIGKILL');
       } catch {}
@@ -148,6 +170,185 @@ export class MusicManager {
         gp.bufferStream.destroy();
       } catch {}
       gp.bufferStream = null;
+    }
+  }
+
+  /**
+   * Node.js Native HTTP/HLS Audio Pump -> FFmpeg stdin (pipe:0).
+   * Bypasses ffmpeg-static's broken gnutls HLS networking on Render/Railway/Cloud hosts
+   * by downloading HLS fMP4 segments or progressive streams via Node's native OpenSSL fetch()
+   * and piping raw media bytes straight into FFmpeg stdin!
+   */
+  private async pumpStreamToFfmpegStdin(
+    streamUrl: string,
+    ffmpeg: ChildProcess,
+    signal: AbortSignal,
+    seekSeconds: number
+  ): Promise<boolean> {
+    const stdin = ffmpeg.stdin;
+    if (!stdin) return false;
+
+    stdin.on('error', () => {});
+
+    const writeChunk = (buf: Buffer): Promise<boolean> => {
+      return new Promise((resolve) => {
+        if (signal.aborted || !stdin.writable) return resolve(false);
+        const canContinue = stdin.write(buf);
+        if (canContinue) {
+          resolve(true);
+        } else {
+          const onDrain = () => {
+            cleanup();
+            resolve(true);
+          };
+          const onClose = () => {
+            cleanup();
+            resolve(false);
+          };
+          const cleanup = () => {
+            stdin.removeListener('drain', onDrain);
+            stdin.removeListener('close', onClose);
+            stdin.removeListener('error', onClose);
+          };
+          stdin.once('drain', onDrain);
+          stdin.once('close', onClose);
+          stdin.once('error', onClose);
+        }
+      });
+    };
+
+    try {
+      const initialRes = await fetch(streamUrl, {
+        headers: SC_BROWSER_HEADERS,
+        signal,
+      });
+
+      if (!initialRes.ok) {
+        return false;
+      }
+
+      const contentType = (initialRes.headers.get('content-type') || '').toLowerCase();
+      const isM3u8 =
+        streamUrl.includes('.m3u8') ||
+        contentType.includes('mpegurl') ||
+        contentType.includes('vnd.apple.mpegurl');
+
+      if (isM3u8) {
+        const m3u8Text = await initialRes.text();
+        if (!m3u8Text.includes('#EXTM3U')) {
+          return false;
+        }
+
+        const resolveRelative = (u: string): string => {
+          if (u.startsWith('http://') || u.startsWith('https://')) return u;
+          try {
+            return new URL(u, streamUrl).toString();
+          } catch {
+            return u;
+          }
+        };
+
+        let initMapUrl: string | null = null;
+        const mapMatch = m3u8Text.match(/#EXT-X-MAP:URI="([^"]+)"/);
+        if (mapMatch && mapMatch[1]) {
+          initMapUrl = resolveRelative(mapMatch[1]);
+        }
+
+        const segments: { url: string; duration: number }[] = [];
+        let nextDur = 10;
+        for (const rawLine of m3u8Text.split('\n')) {
+          const line = rawLine.trim();
+          if (!line) continue;
+          if (line.startsWith('#EXTINF:')) {
+            const durVal = parseFloat(line.slice(8).split(',')[0]);
+            if (!isNaN(durVal) && durVal > 0) nextDur = durVal;
+          } else if (!line.startsWith('#')) {
+            segments.push({ url: resolveRelative(line), duration: nextDur });
+            nextDur = 10;
+          }
+        }
+
+        // 1. Always write fMP4 initialization segment (#EXT-X-MAP) first if present
+        if (initMapUrl) {
+          const initRes = await fetch(initMapUrl, { headers: SC_BROWSER_HEADERS, signal });
+          if (initRes.ok) {
+            const initBuf = Buffer.from(await initRes.arrayBuffer());
+            const ok = await writeChunk(initBuf);
+            if (!ok) return true;
+          }
+        }
+
+        // 2. Calculate starting segment if user requested .seek
+        let startIndex = 0;
+        if (seekSeconds > 0 && segments.length > 1) {
+          let acc = 0;
+          for (let i = 0; i < segments.length; i++) {
+            if (acc + segments[i].duration > seekSeconds) {
+              startIndex = i;
+              break;
+            }
+            acc += segments[i].duration;
+          }
+        }
+
+        // 3. Stream segments sequentially with 1-segment lookahead prefetch
+        let prefetchPromise: Promise<Buffer | null> | null = null;
+        const fetchSegmentBuffer = async (url: string): Promise<Buffer | null> => {
+          try {
+            const segRes = await fetch(url, { headers: SC_BROWSER_HEADERS, signal });
+            if (!segRes.ok) return null;
+            return Buffer.from(await segRes.arrayBuffer());
+          } catch {
+            return null;
+          }
+        };
+
+        for (let i = startIndex; i < segments.length; i++) {
+          if (signal.aborted || !stdin.writable) break;
+
+          const currentPromise = prefetchPromise || fetchSegmentBuffer(segments[i].url);
+          if (i + 1 < segments.length) {
+            prefetchPromise = fetchSegmentBuffer(segments[i + 1].url);
+          } else {
+            prefetchPromise = null;
+          }
+
+          const segBuf = await currentPromise;
+          if (!segBuf || signal.aborted) break;
+
+          const ok = await writeChunk(segBuf);
+          if (!ok) break;
+        }
+
+        if (!signal.aborted && stdin.writable) {
+          stdin.end();
+        }
+        return true;
+      } else {
+        // Progressive HTTP audio stream (.mp3, .m4a, .ogg, .webm)
+        if (!initialRes.body) return false;
+        const reader = initialRes.body.getReader();
+        while (!signal.aborted && stdin.writable) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value && value.byteLength > 0) {
+            const ok = await writeChunk(Buffer.from(value));
+            if (!ok) break;
+          }
+        }
+        if (!signal.aborted && stdin.writable) {
+          stdin.end();
+        }
+        return true;
+      }
+    } catch (err: any) {
+      if (!signal.aborted) {
+        console.warn('[MusicPlayer] Stream pump notice:', err?.message || err);
+      }
+      try {
+        if (stdin.writable) stdin.end();
+      } catch {}
+      return false;
     }
   }
 
@@ -267,7 +468,7 @@ export class MusicManager {
     }
   }
 
-  async playTrack(guildId: string, track: Track, seekSeconds = 0) {
+  async playTrack(guildId: string, track: Track, seekSeconds = 0, isRetry = false) {
     const gp = this.getPlayer(guildId);
     gp.isTransitioning = true;
     gp.currentTrack = track;
@@ -310,33 +511,25 @@ export class MusicManager {
 
       if (gp.player) {
         const filterChain = AUDIO_FILTER_CHAINS[gp.filterMode] || AUDIO_FILTER_CHAINS.clear;
+        const isHlsUrl = streamUrl.includes('.m3u8');
 
-        const ffmpegArgs = [
-          '-reconnect',
-          '1',
-          '-reconnect_streamed',
-          '1',
-          '-reconnect_delay_max',
-          '5',
-          '-http_persistent',
-          '1',
-          '-multiple_requests',
-          '1',
+        const ffmpegArgs: string[] = [
           '-thread_queue_size',
           '4096',
           '-probesize',
-          '256k',
+          '128k',
           '-analyzeduration',
-          '1500000',
+          '1000000',
         ];
 
-        if (seekSeconds > 0) {
+        // For progressive streams, let FFmpeg handle byte-seeking; for HLS, our pump jumps directly to the target segment
+        if (seekSeconds > 0 && !isHlsUrl) {
           ffmpegArgs.push('-ss', String(seekSeconds));
         }
 
         ffmpegArgs.push(
           '-i',
-          streamUrl,
+          'pipe:0',
           '-vn',
           '-af',
           filterChain,
@@ -351,11 +544,18 @@ export class MusicManager {
           'pipe:1'
         );
 
+        const abortController = new AbortController();
+        gp.streamAbort = abortController;
+
         const ffmpeg = spawn(FFMPEG_BIN, ffmpegArgs, {
-          stdio: ['ignore', 'pipe', 'ignore'],
+          stdio: ['pipe', 'pipe', 'pipe'],
         });
 
-        // 16MB RAM PassThrough buffer prevents 64KB OS pipe backpressure from stalling HLS segment downloads
+        ffmpeg.on('error', (err) => {
+          console.error('[FFmpeg Spawn Error]:', err.message);
+        });
+
+        // 16MB RAM PassThrough buffer prevents 64KB OS pipe backpressure from stalling downloads
         const ramBuffer = new PassThrough({
           highWaterMark: 16 * 1024 * 1024,
         });
@@ -364,6 +564,20 @@ export class MusicManager {
 
         gp.ffmpegProcess = ffmpeg;
         gp.bufferStream = ramBuffer;
+
+        // Start pumping HTTP/HLS audio bytes from Node.js fetch() into FFmpeg stdin
+        this.pumpStreamToFfmpegStdin(
+          streamUrl,
+          ffmpeg,
+          abortController.signal,
+          isHlsUrl ? seekSeconds : 0
+        ).then((ok) => {
+          if (!ok && !abortController.signal.aborted && !isRetry) {
+            console.warn(`[MusicPlayer] Stream URL expired or blocked, refreshing URL for "${track.title}"...`);
+            invalidateStreamCache(track);
+            this.playTrack(guildId, track, seekSeconds, true);
+          }
+        });
 
         const resource = createAudioResource(ramBuffer, {
           inputType: StreamType.Raw,
@@ -385,7 +599,7 @@ export class MusicManager {
         }, 1200);
 
         console.log(
-          `[MusicPlayer] High-Fidelity SoX 28-bit stream active: "${track.title}" [EQ: ${gp.filterMode}]`
+          `[MusicPlayer] Node.js Pipe -> SoX 28-bit stream active: "${track.title}" [EQ: ${gp.filterMode}]`
         );
       }
     } catch (e) {

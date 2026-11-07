@@ -1997,47 +1997,89 @@ export default function App() {
               </button>
             </div>
 
-            {/* 24/7 Hosting Guide Card */}
-            <div className="lg:col-span-12 bg-slate-900/80 border border-indigo-500/30 rounded-2xl p-6 backdrop-blur-xl">
-              <h3 className="font-bold text-base text-white flex items-center gap-2 mb-3">
-                <Server className="w-5 h-5 text-emerald-400" />
-                🚀 Hướng Dẫn Cách Host Bot Chạy 24/7 Không Tắt
-              </h3>
+            {/* GitHub Clone & 24/7 Hosting Guide Card */}
+            <div className="lg:col-span-12 bg-slate-900/80 border border-indigo-500/30 rounded-2xl p-6 backdrop-blur-xl space-y-5">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-4">
+                <div>
+                  <h3 className="font-bold text-base text-white flex items-center gap-2">
+                    <Terminal className="w-5 h-5 text-indigo-400" />
+                    📦 Chia Sẻ Source Code & Lệnh Git Clone (Dành Cho Mọi Người)
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-1">
+                    Gửi link GitHub hoặc đoạn lệnh bên dưới cho bạn bè để ai cũng có thể tải về và tự chạy Bot trong 30 giây!
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard.writeText(
+                        'git clone https://github.com/hiumbeo/Bot.git\ncd Bot\nnpm install --legacy-peer-deps\nnpx tsx server.ts'
+                      );
+                      showNotification('success', '📋 Đã copy bộ lệnh git clone & cài đặt!');
+                    }}
+                    className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold px-3.5 py-2 rounded-xl transition shadow-lg shadow-indigo-600/20"
+                  >
+                    📋 Copy Lệnh Git Clone
+                  </button>
+                  <a
+                    href="https://github.com/hiumbeo/Bot"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold px-3.5 py-2 rounded-xl border border-slate-700 flex items-center gap-1.5 transition"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    Mở GitHub (hiumbeo/Bot)
+                  </a>
+                </div>
+              </div>
+
+              <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 font-mono text-xs text-emerald-300 space-y-1 overflow-x-auto">
+                <div className="text-slate-500"># 1. Tải source code về máy tính hoặc VPS</div>
+                <div>git clone https://github.com/hiumbeo/Bot.git</div>
+                <div>cd Bot</div>
+                <div className="text-slate-500 pt-1"># 2. Cài đặt thư viện (không bao giờ lỗi ERESOLVE)</div>
+                <div>npm install --legacy-peer-deps</div>
+                <div className="text-slate-500 pt-1"># 3. Chạy Bot + Web Dashboard tại http://localhost:3000 (hoặc bấm đúp file start.bat trên Windows)</div>
+                <div>npx tsx server.ts</div>
+              </div>
+
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs text-slate-300">
                 <div className="p-4 rounded-xl bg-slate-950/80 border border-slate-800 space-y-2">
-                  <div className="font-bold text-indigo-400 text-sm">
-                    Cách 1: Deploy Cloud Run (Ngay Trên Đây)
+                  <div className="font-bold text-emerald-400 text-sm">
+                    Cách 1: Host Miễn Phí Trên Render.com
                   </div>
                   <p className="text-slate-400 leading-relaxed">
-                    1. Bấm nút <strong>Deploy / Share</strong> ở góc trên cùng giao diện để đẩy lên Google Cloud Run.<br />
-                    2. Thêm biến môi trường <code>DISCORD_BOT_TOKEN</code> và <code>DISCORD_CLIENT_ID</code>.<br />
-                    3. Dùng <a href="https://uptimerobot.com" target="_blank" rel="noreferrer" className="text-indigo-400 underline">UptimeRobot.com</a> (miễn phí) ping vào link <code>https://ten-app-cua-ban/api/bot/status</code> mỗi 5 phút để giữ container thức 24/7!
+                    1. Kết nối repo <code>https://github.com/hiumbeo/Bot</code> vào <strong>Render.com</strong>.<br />
+                    2. Build Command: <code>npm install --legacy-peer-deps &amp;&amp; npm run build</code><br />
+                    3. Start Command: <code>npx tsx server.ts</code><br />
+                    4. Thêm Environment Variable: <code>DISCORD_BOT_TOKEN</code> = Token của bạn.<br />
+                    5. Dùng <a href="https://uptimerobot.com" target="_blank" rel="noreferrer" className="text-indigo-400 underline">UptimeRobot.com</a> ping vào <code>/api/bot/status</code> mỗi 5 phút để thức 24/7!
                   </p>
                 </div>
 
                 <div className="p-4 rounded-xl bg-slate-950/80 border border-slate-800 space-y-2">
-                  <div className="font-bold text-emerald-400 text-sm">
-                    Cách 2: Host Trên Render / Railway / Fly.io
+                  <div className="font-bold text-indigo-400 text-sm">
+                    Cách 2: Chạy Trên Windows (1 Click)
                   </div>
                   <p className="text-slate-400 leading-relaxed">
-                    1. Tải source code (Export ZIP / GitHub).<br />
-                    2. Tạo Web Service trên <strong>Render.com</strong> hoặc <strong>Railway.app</strong>.<br />
-                    3. Build Command: <code>npm install &amp;&amp; npm run build</code><br />
-                    4. Start Command: <code>npm run start</code> (hoặc <code>npx tsx server.ts</code>)<br />
-                    5. Điền <code>DISCORD_BOT_TOKEN</code> trong mục Environment Variables là bot tự login ngay khi bật!
+                    1. Cài đặt <a href="https://nodejs.org" target="_blank" rel="noreferrer" className="text-indigo-400 underline">Node.js 20+</a>.<br />
+                    2. Chạy <code>git clone https://github.com/hiumbeo/Bot.git</code> hoặc tải file ZIP trên GitHub về giải nén.<br />
+                    3. Bấm đúp vào file <code>start.bat</code> trong thư mục.<br />
+                    4. Mở trình duyệt vào <code>http://localhost:3000</code> dán Token là xong!
                   </p>
                 </div>
 
                 <div className="p-4 rounded-xl bg-slate-950/80 border border-slate-800 space-y-2">
                   <div className="font-bold text-amber-400 text-sm">
-                    Cách 3: Treo Trên VPS / Máy Tính Cá Nhân (PM2)
+                    Cách 3: Treo Trên VPS Linux 24/7 (PM2)
                   </div>
                   <p className="text-slate-400 leading-relaxed">
-                    Chạy 4 dòng lệnh sau trong Terminal để bot tự khởi động lại nếu sập:<br />
+                    Copy cụm lệnh này dán thẳng vào Terminal VPS Ubuntu/Debian:<br />
                     <code className="block bg-slate-900 p-2 rounded mt-1 text-emerald-300 font-mono">
-                      npm install<br />
-                      npm install -g pm2<br />
-                      DISCORD_BOT_TOKEN=&quot;token_cua_ban&quot; pm2 start &quot;npx tsx server.ts&quot; --name musicbot<br />
+                      git clone https://github.com/hiumbeo/Bot.git &amp;&amp; cd Bot<br />
+                      npm install --legacy-peer-deps &amp;&amp; npm i -g pm2<br />
+                      DISCORD_BOT_TOKEN=&quot;token&quot; pm2 start &quot;npx tsx server.ts&quot; --name bot<br />
                       pm2 save &amp;&amp; pm2 startup
                     </code>
                   </p>

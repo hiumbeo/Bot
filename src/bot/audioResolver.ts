@@ -8,6 +8,20 @@ const ytdl = new Ytdl();
 
 // Cached SoundCloud client_id (auto-refreshed if expired)
 let cachedScClientId = '39AVoiZVrdvJEMFLH8T0c5WGshQaAPRJ';
+const FALLBACK_SC_CLIENT_IDS = [
+  '39AVoiZVrdvJEMFLH8T0c5WGshQaAPRJ',
+  'iZIs9mchVcX5lhVRyQGGAYlNPVldzAoX',
+  'LBCcHmRB8XSStWL6wKH2HPACspQlXg2P',
+];
+
+export const SC_BROWSER_HEADERS: Record<string, string> = {
+  'User-Agent':
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  Accept: 'application/json, text/javascript, */*; q=0.01',
+  'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7',
+  Origin: 'https://soundcloud.com',
+  Referer: 'https://soundcloud.com/',
+};
 
 // High-speed TTL Caches for 0ms repeat/EQ/seek & reduced API overhead
 interface CacheEntry<T> {
@@ -20,7 +34,7 @@ const streamCache = new Map<string, CacheEntry<string>>();
 let totalCacheHits = 0;
 
 const SEARCH_TTL_MS = 30 * 60 * 1000; // 30 minutes
-const STREAM_TTL_MS = 12 * 60 * 1000; // 12 minutes (CDN signed URLs last ~15-30m)
+const STREAM_TTL_MS = 8 * 60 * 1000; // 8 minutes (CDN signed URLs expire quickly)
 
 export function getResolverCacheStats() {
   return {
@@ -28,6 +42,13 @@ export function getResolverCacheStats() {
     streamCacheSize: streamCache.size,
     cacheHits: totalCacheHits,
   };
+}
+
+export function invalidateStreamCache(track: Track) {
+  const cacheKey = track.id || track.url || track.title;
+  streamCache.delete(cacheKey);
+  track.streamUrl = undefined;
+  track.streamResolvedAt = undefined;
 }
 
 function getCached<T>(map: Map<string, CacheEntry<T>>, key: string): T | null {
@@ -52,13 +73,15 @@ function setCached<T>(map: Map<string, CacheEntry<T>>, key: string, value: T, tt
 export async function getSoundCloudClientId(forceRefresh = false): Promise<string> {
   if (cachedScClientId && !forceRefresh) return cachedScClientId;
   try {
-    const html = await fetch('https://soundcloud.com').then((r) => r.text());
+    const html = await fetch('https://soundcloud.com', { headers: SC_BROWSER_HEADERS }).then((r) =>
+      r.text()
+    );
     const scripts = [...html.matchAll(/src="(https:\/\/a-v2\.sndcdn\.com\/assets\/[^"]+\.js)"/g)].map(
       (m) => m[1]
     );
     for (const s of scripts.slice(-6)) {
-      const js = await fetch(s).then((r) => r.text());
-      const m = js.match(/client_id:"([a-zA-Z0-9]{32})"/);
+      const js = await fetch(s, { headers: SC_BROWSER_HEADERS }).then((r) => r.text());
+      const m = js.match(/client_id[:=]"([a-zA-Z0-9]{32})"/);
       if (m && m[1]) {
         cachedScClientId = m[1];
         return cachedScClientId;
@@ -67,6 +90,9 @@ export async function getSoundCloudClientId(forceRefresh = false): Promise<strin
   } catch (err) {
     console.warn('[AudioResolver] Failed to scrape fresh SoundCloud client_id:', err);
   }
+  const nextFallback =
+    FALLBACK_SC_CLIENT_IDS.find((id) => id !== cachedScClientId) || FALLBACK_SC_CLIENT_IDS[0];
+  cachedScClientId = nextFallback;
   return cachedScClientId;
 }
 
@@ -87,7 +113,7 @@ async function extractScStreamUrl(scTrack: any, clientId: string): Promise<strin
     if (t.preset === 'abr_sq') return 0;
     if (t.format?.protocol === 'progressive') return 100;
     if (t.preset?.includes('160k') || t.quality === 'hq') return 90;
-    if (t.quality === 'sq') return 80;
+    if (t.preset?.includes('96k') || t.quality === 'sq') return 85;
     if (t.format?.protocol === 'hls') return 60;
     return 10;
   };
@@ -98,7 +124,9 @@ async function extractScStreamUrl(scTrack: any, clientId: string): Promise<strin
     if (!chosen?.url) continue;
     try {
       const sep = chosen.url.includes('?') ? '&' : '?';
-      const res = await fetch(`${chosen.url}${sep}client_id=${clientId}`);
+      const res = await fetch(`${chosen.url}${sep}client_id=${clientId}`, {
+        headers: SC_BROWSER_HEADERS,
+      });
       if (!res.ok) continue;
       const data = (await res.json()) as { url?: string };
       if (data.url) return data.url;
@@ -121,7 +149,7 @@ export async function resolveSoundCloudStreamByQuery(
       const searchUrl = `https://api-v2.soundcloud.com/search/tracks?q=${encodeURIComponent(
         query
       )}&client_id=${clientId}&limit=5`;
-      const res = await fetch(searchUrl);
+      const res = await fetch(searchUrl, { headers: SC_BROWSER_HEADERS });
       if (res.status === 401 || res.status === 403) continue;
       if (!res.ok) return null;
 
@@ -153,7 +181,7 @@ async function resolveSoundCloudDirectUrl(
       const apiUrl = `https://api-v2.soundcloud.com/resolve?url=${encodeURIComponent(
         scUrl
       )}&client_id=${clientId}`;
-      const res = await fetch(apiUrl);
+      const res = await fetch(apiUrl, { headers: SC_BROWSER_HEADERS });
       if (res.status === 401 || res.status === 403) continue;
       if (!res.ok) return null;
 
@@ -170,7 +198,7 @@ async function resolveSoundCloudDirectUrl(
 
 /**
  * Resolves a fresh playable stream URL right before playback begins
- * Uses a 12-minute TTL cache so EQ changes, seeking, and loops are instant (0ms)
+ * Uses an 8-minute TTL cache so EQ changes, seeking, and loops are instant (0ms)
  */
 export async function getPlayableStreamUrl(track: Track): Promise<string | null> {
   if (track.platform === 'direct' && track.streamUrl) {
